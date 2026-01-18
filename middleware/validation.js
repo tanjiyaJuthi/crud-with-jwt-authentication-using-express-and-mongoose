@@ -26,6 +26,45 @@ export const validateTodo = [
     }
 ];
 
+// multiple todo validation at once
+export const validateTodosArray = async (req, res, next) => {
+    const todos = req.body;
+
+    if (!Array.isArray(todos) || todos.length === 0) {
+        return res.status(400).json({
+            error: 'Request body must be a non-empty array of todos'
+        });
+    }
+
+    // Validate each todo
+    const errors = [];
+
+    todos.forEach((todo, index) => {
+        if (!todo.title || typeof todo.title !== 'string') {
+            errors.push({ index, field: 'title', message: 'Title is required' });
+        } else if (todo.title.length < 3) {
+            errors.push({ index, field: 'title', message: 'Title must be at least 3 characters' });
+        } else if (todo.title.length > 100) {
+            errors.push({ index, field: 'title', message: 'Title cannot exceed 100 characters' });
+        }
+
+        if (!todo.description || typeof todo.description !== 'string') {
+            errors.push({ index, field: 'description', message: 'Description is required' });
+        } else if (todo.description.length > 500) {
+            errors.push({ index, field: 'description', message: 'Description cannot exceed 500 characters' });
+        }
+
+        if (todo.status && !['active', 'inactive'].includes(todo.status)) {
+            errors.push({ index, field: 'status', message: 'Invalid status value' });
+        }
+    });
+
+    if (errors.length > 0) {
+        return res.status(400).json({ errors });
+    }
+
+    next();
+};
 
 // user signup validation
 export const validateUserSignup = [

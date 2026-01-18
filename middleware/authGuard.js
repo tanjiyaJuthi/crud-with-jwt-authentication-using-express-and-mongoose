@@ -18,10 +18,10 @@ const authGuard = async (req, res, next) => {
         );
         
         // attach user info for further use
-        req.user = {
-            userId: decoded.userId,
-            username: decoded.username
-        };
+        const { username, userId } = decoded;
+        
+        req.username = username;
+        req.userId = userId;
 
         next();
     } catch (error) {

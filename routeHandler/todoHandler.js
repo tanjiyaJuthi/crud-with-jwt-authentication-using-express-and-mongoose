@@ -1,53 +1,37 @@
 import express from 'express';
 import Todo from '../model/Todo.js';
+import User from '../model/User.js';
 import authGuard from '../middleware/authGuard.js';
-import { validateTodo } from '../middleware/validation.js';
+import { validateTodo, validateTodosArray } from '../middleware/validation.js';
+import mongoose from 'mongoose';
 
 const router = express.Router();
-
-// get all the todos
-router.get('/', authGuard, async (req, res) => {
-    try {
-        console.log(req.user);
-        const getAllTodo = await Todo
-                .find()
-                .select({
-                    _id: 0,
-                    __v: 0,
-                    date: 0
-                })
-                .limit(2);
-
-        res.status(200)
-            .json({
-                todos: getAllTodo
-            });
-    } catch (error) {
-        // console.log(error);
-        res.status(500)
-            .json({ message: 'There was a server-side error!' });
-    }
-});
 
 // get all the todos with pagination
 router.get('/', authGuard, async (req, res) => {
     try {
-        const page = parseInt(req.query.page) || 1;
-        const limit = parseInt(req.query.limit) || 10;
+        const page = Math.max(parseInt(req.query.page) || 1, 1);
+        const limit = Math.max(parseInt(req.query.limit) || 10, 1);
         const skip = (page - 1) * limit;
 
-        const totalTodos = await Todo
-            .find()
+        // get paginated todos for the logged-in user
+        const todos = await Todo
+            .find({ user: req.userId })
+            .populate('user', 'name username -_id')
+            .select('-__v -date')
+            .sort({ date: -1 })
             .skip(skip)
-            .limit(limit)
-            .sort({ date: -1 });
+            .limit(limit);
+
+        // count total todos for the logged-in user
+        const totalCount = await Todo.countDocuments({ user: req.userId });
 
         res.status(200)
             .json({
                 page,
                 limit,
-                totalPages: Math.ceil(totalTodos / limit),
-                totalTodos
+                totalPages: Math.ceil(totalCount / limit),
+                totalTodos: totalCount, todos
             });
     } catch (error) {
         res.status(500)
@@ -58,12 +42,25 @@ router.get('/', authGuard, async (req, res) => {
 // get by status
 router.get('/status/:status', authGuard, async (req, res) => {
     try {
-        const getInactiveTodos = await Todo
-            .find({ status: req.params.status })
-            .sort({date: -1 });
+        const allowedStatus = ['active', 'inactive'];
+
+        if (!allowedStatus.includes(req.params.status)) {
+            return res.status(400).json({
+                error: 'Invalid status value'
+            });
+        }
+
+        const todos = await Todo
+            .find({
+                status: req.params.status,
+                user: req.userId
+            })
+            .populate('user', 'name username -_id')
+            .select('-__v -date')
+            .sort({ date: -1 });
 
         res.status(200)
-            .json({ todos: getInactiveTodos });
+            .json({ todos });
     } catch (error) {
         res.status(500)
             .json({ error: 'There was a server-side error!' });
@@ -73,15 +70,21 @@ router.get('/status/:status', authGuard, async (req, res) => {
 // get a todo by id
 router.get('/:id', authGuard, async (req, res) => {
     try {
-        const getTodo = await Todo.findById(req.params.id);
+        const todo = await Todo
+            .findOne({
+                _id: req.params.id,
+                user: req.userId
+            })
+            .populate('user', 'name username -_id')
+            .select('-__v -date');;
 
-        if (!getTodo) {
+        if (!todo) {
             return res.status(404)
                 .json({ error: 'Todo not found!' });
         }
 
         res.status(200)
-            .json({ todo: getTodo });
+            .json({ todo: todo });
     } catch (error) {
         res
             .status(500)
@@ -92,14 +95,27 @@ router.get('/:id', authGuard, async (req, res) => {
 // post a todo
 router.post('/', authGuard, validateTodo, async (req, res) => {
     try {
-        const newTodo = new Todo(req.body);
+        const newTodo = new Todo({
+            ...req.body,
+            user: req.userId
+        });
 
-        await newTodo.save();
+        const savedTodo = await newTodo.save();
+
+        await User.updateOne(
+            { _id: req.userId },
+            { $push : { todos: savedTodo._id }}
+        );
+
+        const populatedTodo = await Todo
+            .findById(savedTodo._id)
+            .populate('user', 'name username -_id')
+            .select('-__v -date');
 
         res.status(200)
             .json({
                 message: 'Todo has been inserted successfully!',
-                todo: newTodo
+                todo: populatedTodo
         });
     } catch (error) {
         res.status(500)
@@ -108,7 +124,7 @@ router.post('/', authGuard, validateTodo, async (req, res) => {
 });
 
 // post multiple todo
-router.post('/all', authGuard, validateTodo, async (req, res) => {
+router.post('/all', authGuard, validateTodosArray, async (req, res) => {
     try {
         const data = req.body;
 
@@ -117,14 +133,36 @@ router.post('/all', authGuard, validateTodo, async (req, res) => {
                 .json({ error: 'Request body must be an array of todos!' });
         }
 
-        const newTodo = await Todo.insertMany(data);
+        // attach user ID to each todo
+        const todosWithUser = data.map(todo => ({
+            ...todo,
+            user: req.userId
+        }));
+
+        // insert all todos
+        const insertedTodos = await Todo.insertMany(todosWithUser);
+
+        // update User.todos field
+        const todoIds = insertedTodos.map(todo => todo._id);
+        await User.updateOne(
+            { _id: req.userId },
+            { $push: { todos: { $each: todoIds } } }
+        );
+
+        // fetch todos with populated user
+        const populatedTodos = await Todo
+            .find({ _id: { $in: todoIds } })
+            .populate('user', 'name username -_id')
+            .select('-__v -date')
+            .sort({ date: -1 });
 
         res.status(200)
             .json({
                 message: 'Todos has been inserted successfully!',
-                todo: newTodo
+                todo: populatedTodos
             });
     } catch (error) {
+        console.error(error);
         res.status(500)
             .json({ error: 'There was a server-side error!' });
     }
@@ -133,14 +171,27 @@ router.post('/all', authGuard, validateTodo, async (req, res) => {
 // update a todo
 router.put('/:id', authGuard, validateTodo, async (req, res) => {
     try {
-        const updatedTodo = await Todo.findByIdAndUpdate(
-            req.params.id,
-            req.body,
-            {
-                new: true,
-                runValidators: true
-            }
-        );
+        // validate ObjectId
+        if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+            return res.status(400)
+                .json({ error: 'Invalid todo ID' });
+        }
+
+        // find and update ffor logged in user
+        const updatedTodo = await Todo
+            .findOneAndUpdate(
+                { 
+                    _id: req.params.id,
+                    user: req.userId
+                },
+                req.body,
+                {
+                    new: true,
+                    runValidators: true
+                }
+            )
+            .populate('user', 'name username -_id')
+            .select('-__v -date');
 
         if (!updatedTodo) {
             return res.status(404)
@@ -153,6 +204,7 @@ router.put('/:id', authGuard, validateTodo, async (req, res) => {
                 todo: updatedTodo
             });
     } catch (error) {
+        console.log(error);
         res.status(500)
             .json({ error: 'There was a server-side error!' });
     }
@@ -161,7 +213,20 @@ router.put('/:id', authGuard, validateTodo, async (req, res) => {
 //delete todo
 router.delete('/:id', authGuard, async (req, res) => {
     try {
-        const deletedTodo = await Todo.findByIdAndDelete(req.params.id);
+        // validate ObjectId
+        if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+            return res.status(400)
+                .json({ error: 'Invalid todo ID' });
+        }
+
+        // delete only if the todo belongs to the logged-in user
+        const deletedTodo = await Todo
+            .findOneAndDelete({
+                _id: req.params.id,
+                user: req.userId
+            })
+            .populate('user', 'name username -_id')
+            .select('-__v -date');
 
         if (!deletedTodo) {
             return res.status(404)

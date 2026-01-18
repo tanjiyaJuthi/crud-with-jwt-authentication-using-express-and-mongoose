@@ -23,7 +23,11 @@ const userSchema = new Schema(
             type: String,
             enum: ['active', 'inactive'],
             default: 'active'
-        }
+        },
+        todos: [{
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'Todo'
+        }]
     },
     {
         timestamps: true
